@@ -15,41 +15,36 @@ var ErrNilConn error = errors.New("conn is nil")
 var ErrNilGopool error = errors.New("gopool is nil, setup gopool first")
 var ErrReadTimeout error = errors.New("read timeout")
 
-type StatusCode int
-
-type CreateWsHandler func() WsHandler
-
-//type CreateNewMessage func() MessageReader
+type Upgrader ws.Upgrader
+type Dialer ws.Dialer
 
 type PoolScheduler interface {
 	Schedule(task func())
 }
 
-type MessageReader interface {
+// for user's implementation
+type Readable interface {
 	ReadWS(r io.Reader, h ws.Header) error
 }
 
 // for user's implementation
-type WsHandler interface {
-	NewMessage() MessageReader
-
-	//UpgradeReqChecker
-	Handle(message interface{}) error
-	HandleClose(error)
+type WsMessageHandler[T Readable] interface {
+	Handle(T) error
+	HandleClose(reason error)
 }
 
-// for user's implementation
-// for ckecking headers while reading request in ws.Upgrade()
-type UpgradeReqChecker interface {
-	// 200 = no err
-	CheckPath(path []byte) StatusCode
-	// 200 = no err
-	CheckHost(host []byte) StatusCode
-	// 200 = no err
-	CheckHeader(key []byte, value []byte) StatusCode
-	// 200 = no err
-	CheckBeforeUpgrade() StatusCode
-}
+// // for user's implementation
+// // for ckecking headers while reading request in ws.Upgrade()
+// type UpgradeReqChecker interface {
+// 	// 200 = no err
+// 	CheckPath(path []byte) StatusCode
+// 	// 200 = no err
+// 	CheckHost(host []byte) StatusCode
+// 	// 200 = no err
+// 	CheckHeader(key []byte, value []byte) StatusCode
+// 	// 200 = no err
+// 	CheckBeforeUpgrade() StatusCode
+// }
 
 type Conn interface {
 	StartServing() error

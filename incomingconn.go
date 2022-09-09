@@ -13,74 +13,69 @@ import (
 	"github.com/mailru/easygo/netpoll"
 )
 
-type EpollWSConnector struct {
+type EpollWSConnector[Tm any, PTm interface {
+	Readable
+	*Tm
+}] struct {
 	conn    net.Conn
 	desc    *netpoll.Desc
-	handler WsHandler
+	handler WsMessageHandler[PTm]
 	sync.RWMutex
 	isclosed bool
 }
 
-var DefaultUpgrader ws.Upgrader
+// func createUpgrader(v UpgradeReqChecker) ws.Upgrader {
+// 	return ws.Upgrader{
+// 		OnRequest: func(uri []byte) error {
+// 			if sc := v.CheckPath(uri); sc != 200 {
+// 				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
+// 			}
+// 			return nil
+// 		},
+// 		OnHost: func(host []byte) error {
+// 			if sc := v.CheckHost(host); sc != 200 {
+// 				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
+// 			}
+// 			return nil
+// 		},
+// 		OnHeader: func(key, value []byte) error {
+// 			if sc := v.CheckHeader(key, value); sc != 200 {
+// 				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
+// 			}
+// 			return nil
+// 		},
+// 		OnBeforeUpgrade: func() (header ws.HandshakeHeader, err error) {
+// 			if sc := v.CheckBeforeUpgrade(); sc != 200 {
+// 				return nil, ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
+// 			}
+// 			return nil, nil
+// 		},
+// 	}
+// }
 
-func createUpgrader(v UpgradeReqChecker) ws.Upgrader {
-	return ws.Upgrader{
-		OnRequest: func(uri []byte) error {
-			if sc := v.CheckPath(uri); sc != 200 {
-				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
-			}
-			return nil
-		},
-		OnHost: func(host []byte) error {
-			if sc := v.CheckHost(host); sc != 200 {
-				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
-			}
-			return nil
-		},
-		OnHeader: func(key, value []byte) error {
-			if sc := v.CheckHeader(key, value); sc != 200 {
-				return ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
-			}
-			return nil
-		},
-		OnBeforeUpgrade: func() (header ws.HandshakeHeader, err error) {
-			if sc := v.CheckBeforeUpgrade(); sc != 200 {
-				return nil, ws.RejectConnectionError(ws.RejectionStatus(int(sc)))
-			}
-			return nil, nil
-		},
-	}
+// upgrades connection and adds it to epoll
+func NewWSConnector[Tmessage any,
+	PTmessage interface {
+		Readable
+		*Tmessage
+	}, Th WsMessageHandler[PTmessage]](conn net.Conn, handler Th) (*EpollWSConnector[Tmessage, PTmessage], error) {
+	//return ((*Upgrader)(&ws.DefaultUpgrader)).NewWSConnector(conn, handler)
+
+	return NewWSConnectorByUpgrader[Tmessage, PTmessage, Th](conn, Upgrader(ws.DefaultUpgrader), handler)
 }
 
 // upgrades connection and adds it to epoll
-func NewWSConnectorWithUpgrade(conn net.Conn, handler WsHandler) (*EpollWSConnector, error) {
+func NewWSConnectorByUpgrader[Tmessage any,
+	PTmessage interface {
+		Readable
+		*Tmessage
+	}, Th WsMessageHandler[PTmessage]](conn net.Conn, u Upgrader, handler Th) (*EpollWSConnector[Tmessage, PTmessage], error) {
+
 	if conn == nil {
 		return nil, ErrNilConn
 	}
-	// upgrade сам отправляет респонс
-	if upgrReqChecker, ok := handler.(UpgradeReqChecker); ok {
-		if _, err := createUpgrader(upgrReqChecker).Upgrade(conn); err != nil {
-			return nil, err
-		}
-	} else {
-		if _, err := ws.DefaultUpgrader.Upgrade(conn); err != nil {
-			return nil, err
-		}
-	}
-
-	desc, err := netpoll.HandleRead(conn)
-	if err != nil {
-		return nil, err
-	}
-
-	connector := &EpollWSConnector{conn: conn, desc: desc, handler: handler}
-
-	return connector, nil
-}
-
-func Dial(ctx context.Context, urlstr string, handler WsHandler) (*EpollWSConnector, error) {
-	conn, _, _, err := ws.Dialer{Timeout: time.Second * 5}.Dial(ctx, urlstr)
-	if err != nil {
+	// Upgrade сам отправляет респонс
+	if _, err := ws.Upgrader(u).Upgrade(conn); err != nil {
 		return nil, err
 	}
 
@@ -89,24 +84,52 @@ func Dial(ctx context.Context, urlstr string, handler WsHandler) (*EpollWSConnec
 		return nil, err
 	}
 
-	connector := &EpollWSConnector{conn: conn, desc: desc, handler: handler}
+	connector := &EpollWSConnector[Tmessage, PTmessage]{conn: conn, desc: desc, handler: handler}
 
 	return connector, nil
 }
 
-func (connector *EpollWSConnector) StartServing() error {
+func Dial[Tmessage any,
+	PTmessage interface {
+		Readable
+		*Tmessage
+	}, Th WsMessageHandler[PTmessage]](ctx context.Context, urlstr string, handler Th) (*EpollWSConnector[Tmessage, PTmessage], error) {
+	return DialWithDialer[Tmessage, PTmessage, Th](ctx, Dialer(ws.DefaultDialer), urlstr, handler)
+}
+
+func DialWithDialer[Tmessage any,
+	PTmessage interface {
+		Readable
+		*Tmessage
+	}, Th WsMessageHandler[PTmessage]](ctx context.Context, d Dialer, urlstr string, handler Th) (*EpollWSConnector[Tmessage, PTmessage], error) {
+	conn, _, _, err := ws.Dialer(d).Dial(ctx, urlstr)
+	if err != nil {
+		return nil, err
+	}
+
+	desc, err := netpoll.HandleRead(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	connector := &EpollWSConnector[Tmessage, PTmessage]{conn: conn, desc: desc, handler: handler}
+
+	return connector, nil
+}
+
+func (connector *EpollWSConnector[_, _]) StartServing() error {
 	return poller.Start(connector.desc, connector.handle)
 }
 
 // MUST be called after StartServing() failure to prevent memory leak!
-func (connector *EpollWSConnector) ClearFromCache() {
+func (connector *EpollWSConnector[_, _]) ClearFromCache() {
 	connector.Lock()
 	defer connector.Unlock()
 
 	connector.stopserving()
 }
 
-func (connector *EpollWSConnector) handle(e netpoll.Event) {
+func (connector *EpollWSConnector[Tm, PTm]) handle(e netpoll.Event) {
 	defer poller.Resume(connector.desc)
 
 	if e&(netpoll.EventReadHup|netpoll.EventHup) != 0 {
@@ -136,7 +159,7 @@ func (connector *EpollWSConnector) handle(e netpoll.Event) {
 		return
 	}
 	//time.Sleep(time.Second)
-	message := connector.handler.NewMessage()
+	message := PTm(new(Tm))
 	if err := message.ReadWS(r, h); err != nil {
 		connector.Unlock() //
 		connector.Close(errors.New(suckutils.ConcatTwo("message.Read() err: ", err.Error())))
@@ -168,7 +191,7 @@ func (connector *EpollWSConnector) handle(e netpoll.Event) {
 	}
 }
 
-func (connector *EpollWSConnector) Send(message []byte) error {
+func (connector *EpollWSConnector[_, _]) Send(message []byte) error {
 	if connector.IsClosed() {
 		return ErrClosedConnector
 	}
@@ -178,7 +201,7 @@ func (connector *EpollWSConnector) Send(message []byte) error {
 	return wsutil.WriteMessage(connector.conn, thisSide, ws.OpBinary, message)
 }
 
-func (connector *EpollWSConnector) Close(reason error) { // TODO: можно добавить отправку OpClose перед закрытием соединения
+func (connector *EpollWSConnector[_, _]) Close(reason error) { // TODO: можно добавить отправку OpClose перед закрытием соединения
 	connector.Lock()
 	defer connector.Unlock()
 
@@ -189,7 +212,7 @@ func (connector *EpollWSConnector) Close(reason error) { // TODO: можно д�
 	connector.handler.HandleClose(reason)
 }
 
-func (connector *EpollWSConnector) stopserving() error {
+func (connector *EpollWSConnector[_, _]) stopserving() error {
 	connector.isclosed = true
 	poller.Stop(connector.desc)
 	connector.desc.Close()
@@ -197,12 +220,12 @@ func (connector *EpollWSConnector) stopserving() error {
 }
 
 // call in HandleClose() will cause deadlock
-func (connector *EpollWSConnector) IsClosed() bool {
+func (connector *EpollWSConnector[_, _]) IsClosed() bool {
 	connector.RLock()
 	defer connector.RUnlock()
 	return connector.isclosed
 }
 
-func (connector *EpollWSConnector) RemoteAddr() net.Addr {
+func (connector *EpollWSConnector[_, _]) RemoteAddr() net.Addr {
 	return connector.conn.RemoteAddr()
 }
